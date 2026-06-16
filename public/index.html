@@ -437,24 +437,44 @@
     return bal;
   }
 
-  function computeSettlements(bal) {
-    var creditors = [], debtors = [];
-    Object.keys(bal).forEach(function (id) {
-      var v = Math.round(bal[id] * 100) / 100;
-      if (v > 0.005) creditors.push({ id: id, amt: v });
-      else if (v < -0.005) debtors.push({ id: id, amt: -v });
-    });
-    creditors.sort(function (a, b) { return b.amt - a.amt; });
-    debtors.sort(function (a, b) { return b.amt - a.amt; });
-    var tx = [], i = 0, j = 0;
-    while (i < debtors.length && j < creditors.length) {
-      var pay = Math.min(debtors[i].amt, creditors[j].amt);
-      tx.push({ from: debtors[i].id, to: creditors[j].id, amt: pay });
-      debtors[i].amt -= pay;
-      creditors[j].amt -= pay;
-      if (debtors[i].amt < 0.005) i++;
-      if (creditors[j].amt < 0.005) j++;
+  // Pairwise settlement: each person pays back exactly who they owe, per
+  // expense. We build a who-owes-whom matrix from the expenses, then net each
+  // pair. (This mirrors the real debts — e.g. your share of a bill goes back to
+  // whoever actually paid that bill — rather than collapsing everything into
+  // the fewest possible transfers.)
+  function computeSettlements() {
+    var member = {};
+    state.people.forEach(function (p) { member[p.id] = true; });
+
+    var owe = {}; // owe[a][b] = how much a owes b
+    function add(from, to, amt) {
+      if (from === to) return;
+      owe[from] = owe[from] || {};
+      owe[from][to] = (owe[from][to] || 0) + amt;
     }
+
+    state.expenses.forEach(function (e) {
+      if (!member[e.payer]) return;
+      var shares = e.shares.filter(function (id) { return member[id]; });
+      if (!shares.length) return;
+      var per = e.amount / shares.length;
+      shares.forEach(function (id) { add(id, e.payer, per); });
+    });
+
+    // Net each pair so we never show A→B and B→A at the same time.
+    var ids = state.people.map(function (p) { return p.id; });
+    var tx = [];
+    for (var i = 0; i < ids.length; i++) {
+      for (var j = i + 1; j < ids.length; j++) {
+        var a = ids[i], b = ids[j];
+        var ab = (owe[a] && owe[a][b]) || 0;
+        var ba = (owe[b] && owe[b][a]) || 0;
+        var net = Math.round((ab - ba) * 100) / 100;
+        if (net > 0.005) tx.push({ from: a, to: b, amt: net });
+        else if (net < -0.005) tx.push({ from: b, to: a, amt: -net });
+      }
+    }
+    tx.sort(function (x, y) { return y.amt - x.amt; });
     return tx;
   }
 
@@ -551,7 +571,7 @@
 
   function renderSettlement() {
     var bal = computeBalances();
-    var tx = computeSettlements(bal);
+    var tx = computeSettlements();
     var list = $("settleList");
     list.innerHTML = "";
 
@@ -682,8 +702,7 @@
   }
 
   function exportSummary() {
-    var bal = computeBalances();
-    var tx = computeSettlements(bal);
+    var tx = computeSettlements();
     var total = state.expenses.reduce(function (s, e) { return s + e.amount; }, 0);
     var lines = ["🏖️ " + (trip.name || "Serifos Trip") + " — bill split", "Total spent: " + eur(total), ""];
     if (tx.length) {
